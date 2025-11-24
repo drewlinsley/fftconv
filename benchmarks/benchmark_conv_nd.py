@@ -151,17 +151,12 @@ def benchmark_backward_2d(B, C, H, W, dtype, device='cuda'):
     print(f"\n2D Backward Benchmark: B={B}, C={C}, H={H}, W={W}, dtype={dtype}")
     print("-" * 70)
 
-    # Create input with gradients
-    x = torch.randn(B, C, H, W, device=device, dtype=dtype, requires_grad=True)
-    k = torch.randn(C, H, W, device=device, dtype=torch.float32, requires_grad=True) * 0.01
-
     fftconv = FlashFFTConv2D(H, W, dtype=dtype).to(device)
 
     def run_fwd_bwd():
-        if x.grad is not None:
-            x.grad.zero_()
-        if k.grad is not None:
-            k.grad.zero_()
+        # Create fresh tensors each iteration to avoid graph reuse issues
+        x = (torch.randn(B, C, H, W, device=device, dtype=dtype) * 0.1).requires_grad_(True)
+        k = (torch.randn(C, H, W, device=device, dtype=torch.float32) * 0.01).requires_grad_(True)
         out = fftconv(x, k)
         loss = out.sum()
         loss.backward()
