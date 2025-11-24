@@ -28,43 +28,40 @@ def benchmark_forward(fn, warmup=10, rep=100):
 
 
 def benchmark_2d(B, C, H, W, kernel_size, dtype, device='cuda'):
-    """Benchmark 2D convolutions."""
+    """Benchmark 2D convolutions - FAIR comparison with same kernel size."""
     print(f"\n2D Benchmark: B={B}, C={C}, H={H}, W={W}, K={kernel_size}, dtype={dtype}")
     print("-" * 70)
 
+    K = kernel_size
     # Create input
     x = torch.randn(B, C, H, W, device=device, dtype=dtype)
 
     # =========================================================================
-    # Standard PyTorch Conv2d
+    # Standard PyTorch Conv2d (depthwise for fair comparison)
     # =========================================================================
-    conv_std = torch.nn.Conv2d(C, C, kernel_size, padding=kernel_size // 2, bias=False).to(device).to(dtype)
+    conv_std = torch.nn.Conv2d(C, C, K, padding=K // 2, groups=C, bias=False).to(device).to(dtype)
 
     def run_std():
         return conv_std(x)
 
     time_std = benchmark_forward(run_std)
-    print(f"PyTorch Conv2d (K={kernel_size}): {time_std:.3f} ms")
+    print(f"PyTorch Conv2d (K={K}×{K}): {time_std:.3f} ms")
 
     # =========================================================================
-    # FlashFFTConv2D
+    # FlashFFTConv2D with SAME small kernel
     # =========================================================================
     fftconv = FlashFFTConv2D(H, W, dtype=dtype).to(device)
-    k_fft = torch.randn(C, H, W, device=device, dtype=torch.float32) * 0.01
-
-    # Apply decay for realistic kernel
-    decay_h = torch.exp(-0.1 * torch.arange(H, device=device)).view(-1, 1)
-    decay_w = torch.exp(-0.1 * torch.arange(W, device=device)).view(1, -1)
-    k_fft = k_fft * decay_h * decay_w
+    # Use same kernel size as Conv2d for fair comparison
+    k_fft = torch.randn(C, K, K, device=device, dtype=torch.float32) * 0.01
 
     def run_fft():
         return fftconv(x, k_fft)
 
     time_fft = benchmark_forward(run_fft)
-    print(f"FlashFFTConv2D (full): {time_fft:.3f} ms")
+    print(f"FlashFFTConv2D (K={K}×{K}): {time_fft:.3f} ms  [FFT+multiply+IFFT]")
 
     # =========================================================================
-    # PyTorch FFT (baseline)
+    # PyTorch FFT (baseline) - also with small kernel
     # =========================================================================
     def run_torch_fft():
         fft_size = (2 * H, 2 * W)
@@ -75,9 +72,13 @@ def benchmark_2d(B, C, H, W, kernel_size, dtype, device='cuda'):
         return y[..., :H, :W].to(dtype)
 
     time_torch_fft = benchmark_forward(run_torch_fft)
-    print(f"PyTorch torch.fft.rfftn: {time_torch_fft:.3f} ms")
+    print(f"PyTorch torch.fft.rfftn (K={K}×{K}): {time_torch_fft:.3f} ms")
 
-    print(f"\nSpeedup vs Conv2d (K={kernel_size}): {time_std / time_fft:.2f}x")
+    # Report which is faster
+    if time_fft < time_std:
+        print(f"\nFFT conv is {time_std / time_fft:.2f}x FASTER than Conv2d")
+    else:
+        print(f"\nConv2d is {time_fft / time_std:.2f}x FASTER than FFT conv")
 
     return {
         'conv2d': time_std,
@@ -87,44 +88,40 @@ def benchmark_2d(B, C, H, W, kernel_size, dtype, device='cuda'):
 
 
 def benchmark_3d(B, C, D, H, W, kernel_size, dtype, device='cuda'):
-    """Benchmark 3D convolutions."""
+    """Benchmark 3D convolutions - FAIR comparison with same kernel size."""
     print(f"\n3D Benchmark: B={B}, C={C}, D={D}, H={H}, W={W}, K={kernel_size}, dtype={dtype}")
     print("-" * 70)
 
+    K = kernel_size
     # Create input
     x = torch.randn(B, C, D, H, W, device=device, dtype=dtype)
 
     # =========================================================================
-    # Standard PyTorch Conv3d
+    # Standard PyTorch Conv3d (depthwise for fair comparison)
     # =========================================================================
-    conv_std = torch.nn.Conv3d(C, C, kernel_size, padding=kernel_size // 2, bias=False).to(device).to(dtype)
+    conv_std = torch.nn.Conv3d(C, C, K, padding=K // 2, groups=C, bias=False).to(device).to(dtype)
 
     def run_std():
         return conv_std(x)
 
     time_std = benchmark_forward(run_std)
-    print(f"PyTorch Conv3d (K={kernel_size}): {time_std:.3f} ms")
+    print(f"PyTorch Conv3d (K={K}×{K}×{K}): {time_std:.3f} ms")
 
     # =========================================================================
-    # FlashFFTConv3D
+    # FlashFFTConv3D with SAME small kernel
     # =========================================================================
     fftconv = FlashFFTConv3D(D, H, W, dtype=dtype).to(device)
-    k_fft = torch.randn(C, D, H, W, device=device, dtype=torch.float32) * 0.01
-
-    # Apply decay for realistic kernel
-    decay_d = torch.exp(-0.1 * torch.arange(D, device=device)).view(-1, 1, 1)
-    decay_h = torch.exp(-0.1 * torch.arange(H, device=device)).view(1, -1, 1)
-    decay_w = torch.exp(-0.1 * torch.arange(W, device=device)).view(1, 1, -1)
-    k_fft = k_fft * decay_d * decay_h * decay_w
+    # Use same kernel size as Conv3d for fair comparison
+    k_fft = torch.randn(C, K, K, K, device=device, dtype=torch.float32) * 0.01
 
     def run_fft():
         return fftconv(x, k_fft)
 
     time_fft = benchmark_forward(run_fft)
-    print(f"FlashFFTConv3D (full): {time_fft:.3f} ms")
+    print(f"FlashFFTConv3D (K={K}×{K}×{K}): {time_fft:.3f} ms  [FFT+multiply+IFFT]")
 
     # =========================================================================
-    # PyTorch FFT (baseline)
+    # PyTorch FFT (baseline) - also with small kernel
     # =========================================================================
     def run_torch_fft():
         fft_size = (2 * D, 2 * H, 2 * W)
@@ -135,9 +132,13 @@ def benchmark_3d(B, C, D, H, W, kernel_size, dtype, device='cuda'):
         return y[..., :D, :H, :W].to(dtype)
 
     time_torch_fft = benchmark_forward(run_torch_fft)
-    print(f"PyTorch torch.fft.rfftn: {time_torch_fft:.3f} ms")
+    print(f"PyTorch torch.fft.rfftn (K={K}×{K}×{K}): {time_torch_fft:.3f} ms")
 
-    print(f"\nSpeedup vs Conv3d (K={kernel_size}): {time_std / time_fft:.2f}x")
+    # Report which is faster
+    if time_fft < time_std:
+        print(f"\nFFT conv is {time_std / time_fft:.2f}x FASTER than Conv3d")
+    else:
+        print(f"\nConv3d is {time_fft / time_std:.2f}x FASTER than FFT conv")
 
     return {
         'conv3d': time_std,
