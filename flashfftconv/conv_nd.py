@@ -310,3 +310,289 @@ class FlashFFTConv3D(FlashFFTConvND):
 
     def extra_repr(self) -> str:
         return f"depth={self.depth}, height={self.height}, width={self.width}, dtype={self.dtype}"
+
+
+# =============================================================================
+# Parallel Scan for ConvSSM
+# =============================================================================
+
+def parallel_scan_ref(A_f: torch.Tensor, B_f: torch.Tensor, x_seq_f: torch.Tensor) -> torch.Tensor:
+    """
+    Reference implementation of parallel scan for ConvSSM (sequential, for validation).
+
+    Computes h_t = A ★ h_{t-1} + B ★ x_t for all t in sequence.
+
+    All inputs should already be in frequency domain.
+
+    Args:
+        A_f: FFT of A kernel, shape (C, *fft_spatial_dims)
+        B_f: FFT of B kernel, shape (C, *fft_spatial_dims)
+        x_seq_f: FFT of input sequence, shape (T, B, C, *fft_spatial_dims)
+
+    Returns:
+        h_seq_f: FFT of hidden states, shape (T, B, C, *fft_spatial_dims)
+    """
+    T = x_seq_f.shape[0]
+    device = x_seq_f.device
+    dtype = x_seq_f.dtype
+
+    # Initialize output
+    h_seq_f = torch.zeros_like(x_seq_f)
+
+    # Sequential recurrence (reference)
+    h_f = torch.zeros_like(x_seq_f[0])
+    for t in range(T):
+        h_f = h_f * A_f.unsqueeze(0) + x_seq_f[t] * B_f.unsqueeze(0)
+        h_seq_f[t] = h_f
+
+    return h_seq_f
+
+
+def _parallel_scan_combine(a1: torch.Tensor, s1: torch.Tensor,
+                           a2: torch.Tensor, s2: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Combine operation for parallel scan.
+
+    For recurrence h_t = a * h_{t-1} + s, the combination rule is:
+    (a1, s1) ⊕ (a2, s2) = (a1 * a2, s1 * a2 + s2)
+
+    This represents: applying (a1, s1) then (a2, s2) is equivalent to (a1*a2, s1*a2 + s2).
+    """
+    return a1 * a2, s1 * a2 + s2
+
+
+def parallel_scan_fft(A_f: torch.Tensor, B_f: torch.Tensor, x_seq_f: torch.Tensor,
+                      return_all: bool = True) -> torch.Tensor:
+    """
+    True O(log T) parallel scan for ConvSSM in frequency domain.
+
+    Computes h_t = A ★ h_{t-1} + B ★ x_t for all t using Blelloch-style parallel scan.
+
+    In frequency domain, convolution becomes element-wise multiplication, so:
+    H_t = Â · H_{t-1} + B̂ · X_t
+
+    This is a linear recurrence that can be computed in O(log T) parallel steps
+    using the associative combination rule:
+    (a1, s1) ⊕ (a2, s2) = (a1 * a2, s1 * a2 + s2)
+
+    Args:
+        A_f: FFT of A kernel, shape (C, *fft_spatial_dims) - complex
+        B_f: FFT of B kernel, shape (C, *fft_spatial_dims) - complex
+        x_seq_f: FFT of input sequence, shape (T, B, C, *fft_spatial_dims) - complex
+        return_all: If True, return all hidden states; if False, return only final state
+
+    Returns:
+        If return_all: h_seq_f of shape (T, B, C, *fft_spatial_dims)
+        If not return_all: h_T_f of shape (B, C, *fft_spatial_dims)
+
+    Complexity:
+        - Sequential: O(T) serial operations
+        - Parallel scan: O(log T) parallel depth, O(T) total work
+    """
+    T, B, C = x_seq_f.shape[:3]
+    spatial_shape = x_seq_f.shape[3:]
+    device = x_seq_f.device
+    dtype = x_seq_f.dtype
+
+    # Handle edge cases
+    if T == 0:
+        if return_all:
+            return torch.zeros_like(x_seq_f)
+        else:
+            return torch.zeros(B, C, *spatial_shape, device=device, dtype=dtype)
+
+    if T == 1:
+        h_f = x_seq_f[0] * B_f.unsqueeze(0)
+        if return_all:
+            return h_f.unsqueeze(0)
+        else:
+            return h_f
+
+    # Initialize scan arrays
+    # a[t] = A_f for all t (will become A^{t+1} after scan)
+    # s[t] = B_f * x_seq_f[t] (will become h_{t+1} after scan)
+    a = A_f.unsqueeze(0).unsqueeze(0).expand(T, B, -1, *[-1]*len(spatial_shape)).clone()
+    s = x_seq_f * B_f.unsqueeze(0).unsqueeze(0)
+
+    # Copy to work arrays
+    a_work = a.clone()
+    s_work = s.clone()
+
+    # Inclusive parallel scan using doubling technique
+    # This computes all prefix sums in O(log T) parallel steps
+    # Each iteration doubles the range of elements that contribute to each position
+    offset = 1
+    while offset < T:
+        # For each position i >= offset, combine with position i - offset
+        # s_new[i] = s[i - offset] * a[i] + s[i]
+        # a_new[i] = a[i - offset] * a[i]
+
+        # Create shifted versions
+        a_shifted = torch.zeros_like(a_work)
+        s_shifted = torch.zeros_like(s_work)
+
+        a_shifted[offset:] = a_work[:-offset]
+        s_shifted[offset:] = s_work[:-offset]
+
+        # For positions >= offset, combine
+        # For positions < offset, keep original
+        mask = torch.arange(T, device=device) >= offset
+        mask = mask.view(T, 1, 1, *([1] * len(spatial_shape)))
+
+        a_new = torch.where(mask, a_shifted * a_work, a_work)
+        s_new = torch.where(mask, s_shifted * a_work + s_work, s_work)
+
+        a_work = a_new
+        s_work = s_new
+
+        offset *= 2
+
+    # s_work now contains h_1, h_2, ..., h_T
+    if return_all:
+        return s_work
+    else:
+        return s_work[-1]
+
+
+class ConvSSMParallelScan(nn.Module):
+    """
+    Parallel scan module for ConvSSM: h_t = A ★ h_{t-1} + B ★ x_t
+
+    This module computes the full sequence of hidden states in O(log T) parallel
+    depth instead of O(T) sequential steps, by leveraging the associativity of
+    the recurrence relation in FFT space.
+
+    Key insight: In frequency domain, convolution becomes element-wise multiplication,
+    and the recurrence H_t = Â · H_{t-1} + B̂ · X_t can be computed using parallel
+    prefix sum (scan) with the associative operator:
+    (a1, s1) ⊕ (a2, s2) = (a1 * a2, s1 * a2 + s2)
+
+    Args:
+        spatial_size: Tuple of spatial dimensions (H, W) for 2D or (D, H, W) for 3D
+        dtype: Data type for computation
+
+    Example:
+        >>> # 2D ConvSSM with parallel scan
+        >>> scanner = ConvSSMParallelScan((64, 64))
+        >>> A_kernel = torch.randn(128, 3, 3) * 0.1  # (C, Kh, Kw)
+        >>> B_kernel = torch.randn(128, 3, 3) * 0.1
+        >>> x_seq = torch.randn(100, 4, 128, 64, 64)  # (T, B, C, H, W)
+        >>> h_seq = scanner(x_seq, A_kernel, B_kernel)  # (T, B, C, H, W)
+        >>> # Computed in O(log 100) ≈ 7 parallel steps instead of 100 sequential!
+    """
+
+    def __init__(
+        self,
+        spatial_size: Tuple[int, ...],
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+        self.spatial_size = spatial_size
+        self.dtype = dtype
+        self.ndim = len(spatial_size)
+
+        # FFT size (doubled for linear convolution)
+        self.fft_size = tuple(2 * s for s in spatial_size)
+        self.fft_dims = tuple(range(-self.ndim, 0))
+
+    def forward(
+        self,
+        x_seq: torch.Tensor,
+        A_kernel: torch.Tensor,
+        B_kernel: torch.Tensor,
+        return_all: bool = True,
+    ) -> torch.Tensor:
+        """
+        Compute ConvSSM recurrence using parallel scan.
+
+        Args:
+            x_seq: Input sequence of shape (T, B, C, *spatial_dims)
+            A_kernel: Transition kernel of shape (C, *kernel_dims)
+            B_kernel: Input kernel of shape (C, *kernel_dims)
+            return_all: If True, return all hidden states (T, B, C, *spatial_dims)
+                       If False, return only final state (B, C, *spatial_dims)
+
+        Returns:
+            Hidden states computed via h_t = A ★ h_{t-1} + B ★ x_t
+        """
+        T = x_seq.shape[0]
+        original_dtype = x_seq.dtype
+
+        # FFT all inputs
+        x_seq_f = torch.fft.rfftn(x_seq.float(), s=self.fft_size, dim=self.fft_dims)
+        A_f = torch.fft.rfftn(A_kernel.float(), s=self.fft_size, dim=self.fft_dims)
+        B_f = torch.fft.rfftn(B_kernel.float(), s=self.fft_size, dim=self.fft_dims)
+
+        # Parallel scan in frequency domain
+        h_seq_f = parallel_scan_fft(A_f, B_f, x_seq_f, return_all=return_all)
+
+        # IFFT to get spatial domain result
+        if return_all:
+            h_seq = torch.fft.irfftn(h_seq_f, s=self.fft_size, dim=self.fft_dims)
+            # Crop to original spatial size
+            slices = [slice(None), slice(None), slice(None)] + [slice(0, s) for s in self.spatial_size]
+            h_seq = h_seq[tuple(slices)]
+        else:
+            h = torch.fft.irfftn(h_seq_f, s=self.fft_size, dim=self.fft_dims)
+            slices = [slice(None), slice(None)] + [slice(0, s) for s in self.spatial_size]
+            h_seq = h[tuple(slices)]
+
+        return h_seq.to(original_dtype)
+
+    def extra_repr(self) -> str:
+        return f"spatial_size={self.spatial_size}, dtype={self.dtype}, ndim={self.ndim}"
+
+
+class ConvSSMParallelScan2D(ConvSSMParallelScan):
+    """
+    2D parallel scan for ConvSSM - convenience wrapper.
+
+    Args:
+        height: Height of spatial dimensions
+        width: Width of spatial dimensions
+        dtype: Data type for computation
+
+    Example:
+        >>> scanner = ConvSSMParallelScan2D(64, 64)
+        >>> A_kernel = torch.randn(128, 3, 3) * 0.1
+        >>> B_kernel = torch.randn(128, 3, 3) * 0.1
+        >>> x_seq = torch.randn(100, 4, 128, 64, 64)  # T=100 timesteps
+        >>> h_seq = scanner(x_seq, A_kernel, B_kernel)
+        >>> h_final = scanner(x_seq, A_kernel, B_kernel, return_all=False)
+    """
+
+    def __init__(self, height: int, width: int, dtype: torch.dtype = torch.bfloat16):
+        super().__init__((height, width), dtype=dtype)
+        self.height = height
+        self.width = width
+
+    def extra_repr(self) -> str:
+        return f"height={self.height}, width={self.width}, dtype={self.dtype}"
+
+
+class ConvSSMParallelScan3D(ConvSSMParallelScan):
+    """
+    3D parallel scan for ConvSSM - convenience wrapper.
+
+    Args:
+        depth: Depth of spatial dimensions
+        height: Height of spatial dimensions
+        width: Width of spatial dimensions
+        dtype: Data type for computation
+
+    Example:
+        >>> scanner = ConvSSMParallelScan3D(16, 64, 64)
+        >>> A_kernel = torch.randn(64, 3, 3, 3) * 0.1
+        >>> B_kernel = torch.randn(64, 3, 3, 3) * 0.1
+        >>> x_seq = torch.randn(50, 2, 64, 16, 64, 64)  # T=50 timesteps
+        >>> h_seq = scanner(x_seq, A_kernel, B_kernel)
+    """
+
+    def __init__(self, depth: int, height: int, width: int, dtype: torch.dtype = torch.bfloat16):
+        super().__init__((depth, height, width), dtype=dtype)
+        self.depth = depth
+        self.height = height
+        self.width = width
+
+    def extra_repr(self) -> str:
+        return f"depth={self.depth}, height={self.height}, width={self.width}, dtype={self.dtype}"

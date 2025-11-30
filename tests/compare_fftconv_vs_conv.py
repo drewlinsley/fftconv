@@ -18,13 +18,14 @@ Usage:
 """
 
 import argparse
+import math
 import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from flashfftconv import FlashFFTConv2D, FlashFFTConv3D
+from flashfftconv import FlashFFTConv2D, FlashFFTConv3D, ConvSSMParallelScan2D
 
 
 def time_fn(fn, warmup=5, rep=20):
@@ -426,52 +427,69 @@ def compare_multi_timestep(B, C, H, W, K, T, device='cuda', visualize=False):
     time_fft = (time.perf_counter() - start) / 10 * 1000
 
     # =========================================================================
-    # Method 3: FFT-based parallel scan (simulated)
-    # In a true parallel scan, we pre-compute in FFT space
+    # Method 3: TRUE parallel scan using O(log T) algorithm
     # =========================================================================
-    def run_fft_parallel_scan_simulation():
+    scanner = ConvSSMParallelScan2D(H, W).to(device)
+
+    def run_true_parallel_scan():
         """
-        Simulate the parallel scan approach:
-        1. FFT all inputs once: O(T * N log N)
-        2. FFT kernel once: O(N log N)
-        3. Parallel scan with element-wise multiplies: O(log T * N)
-        4. IFFT result: O(N log N)
+        True O(log T) parallel scan using associative property.
 
-        Key: Kernel stays constant size in FFT space!
-        In pixel space, A^T would grow to (T*K) x (T*K)
-        In FFT space, Â^T is still just N complex values
+        The recurrence h_t = A * h_{t-1} + B * x_t can be computed in O(log T)
+        parallel depth using the associative combination rule:
+        (a1, s1) ⊕ (a2, s2) = (a1 * a2, s1 * a2 + s2)
+
+        Complexity:
+        - FFT all inputs: O(T * N log N) - parallelizable across T
+        - Parallel scan: O(log T) depth, O(T * N) work
+        - IFFT result: O(N log N)
         """
-        fft_size = (2 * H, 2 * W)
-
-        # Pre-FFT all inputs (can be parallelized)
-        x_seq_f = torch.fft.rfftn(x_seq.float(), s=fft_size, dim=(-2, -1))
-
-        # FFT kernels once
-        A_f = torch.fft.rfftn(A_fft.float(), s=fft_size, dim=(-2, -1))
-        B_f = torch.fft.rfftn(B_fft.float(), s=fft_size, dim=(-2, -1))
-
-        # Parallel scan in FFT space (simplified sequential version)
-        # True parallel scan would use O(log T) depth
-        h_f = torch.zeros(B, C, *A_f.shape[-2:], device=device, dtype=torch.complex64)
-        for t in range(T):
-            h_f = h_f * A_f.unsqueeze(0) + x_seq_f[t] * B_f.unsqueeze(0)
-
-        # Single IFFT at the end
-        h = torch.fft.irfftn(h_f, s=fft_size, dim=(-2, -1))[..., :H, :W]
-        return h
+        # Get only final state for fair comparison
+        h_final = scanner(x_seq, A_fft, B_fft, return_all=False)
+        return h_final
 
     # Warmup and time
     for _ in range(3):
-        run_fft_parallel_scan_simulation()
+        run_true_parallel_scan()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
 
     start = time.perf_counter()
     for _ in range(10):
-        out_parallel = run_fft_parallel_scan_simulation()
+        out_parallel = run_true_parallel_scan()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     time_parallel = (time.perf_counter() - start) / 10 * 1000
+
+    # =========================================================================
+    # Method 4: Old sequential FFT (for comparison)
+    # =========================================================================
+    def run_fft_sequential_in_freq():
+        """Sequential scan staying in frequency domain (no per-step IFFT)."""
+        fft_size = (2 * H, 2 * W)
+        x_seq_f = torch.fft.rfftn(x_seq.float(), s=fft_size, dim=(-2, -1))
+        A_f = torch.fft.rfftn(A_fft.float(), s=fft_size, dim=(-2, -1))
+        B_f = torch.fft.rfftn(B_fft.float(), s=fft_size, dim=(-2, -1))
+
+        h_f = torch.zeros(B, C, *A_f.shape[-2:], device=device, dtype=torch.complex64)
+        for t in range(T):
+            h_f = h_f * A_f.unsqueeze(0) + x_seq_f[t] * B_f.unsqueeze(0)
+
+        h = torch.fft.irfftn(h_f, s=fft_size, dim=(-2, -1))[..., :H, :W]
+        return h
+
+    # Warmup and time
+    for _ in range(3):
+        run_fft_sequential_in_freq()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    start = time.perf_counter()
+    for _ in range(10):
+        out_seq_freq = run_fft_sequential_in_freq()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    time_seq_freq = (time.perf_counter() - start) / 10 * 1000
 
     # =========================================================================
     # Results
@@ -479,38 +497,53 @@ def compare_multi_timestep(B, C, H, W, K, T, device='cuda', visualize=False):
     print(f"\nTiming for {T} timesteps:")
     print(f"  Conv2d sequential:      {time_conv:.3f} ms  ({T}× conv per step)")
     print(f"  FFTConv sequential:     {time_fft:.3f} ms  ({T}× FFT+mul+IFFT per step)")
-    print(f"  FFT parallel scan:      {time_parallel:.3f} ms  (FFT once, mul in freq domain)")
+    print(f"  FFT seq in freq:        {time_seq_freq:.3f} ms  (FFT once, {T}× mul, IFFT once)")
+    print(f"  TRUE parallel scan:     {time_parallel:.3f} ms  (O(log {T})={int(math.ceil(math.log2(T)))} steps)")
 
     print(f"\nPer-timestep cost:")
     print(f"  Conv2d:       {time_conv/T:.3f} ms/step")
     print(f"  FFTConv:      {time_fft/T:.3f} ms/step")
+    print(f"  Seq in freq:  {time_seq_freq/T:.3f} ms/step")
     print(f"  Parallel:     {time_parallel/T:.3f} ms/step (amortized)")
 
     # Compare outputs
     diff_conv_fft = (out_conv - out_fft).abs()
     diff_conv_parallel = (out_conv - out_parallel).abs()
+    diff_conv_seq_freq = (out_conv - out_seq_freq).abs()
 
-    print(f"\nOutput comparison:")
-    print(f"  Conv vs FFTConv max diff:      {diff_conv_fft.max().item():.6f}")
-    print(f"  Conv vs Parallel max diff:     {diff_conv_parallel.max().item():.6f}")
+    print(f"\nOutput comparison (vs Conv2d reference):")
+    print(f"  FFTConv sequential max diff:   {diff_conv_fft.max().item():.6f}")
+    print(f"  FFT seq in freq max diff:      {diff_conv_seq_freq.max().item():.6f}")
+    print(f"  TRUE parallel scan max diff:   {diff_conv_parallel.max().item():.6f}")
 
     # Speedup analysis
     print(f"\nSpeedup analysis:")
-    if time_parallel < time_conv:
-        print(f"  Parallel scan is {time_conv/time_parallel:.2f}x faster than Conv2d")
-    else:
-        print(f"  Conv2d is {time_parallel/time_conv:.2f}x faster than parallel scan")
+    fastest = min(time_conv, time_fft, time_seq_freq, time_parallel)
+    methods = [
+        ("Conv2d sequential", time_conv),
+        ("FFTConv sequential", time_fft),
+        ("FFT seq in freq", time_seq_freq),
+        ("TRUE parallel scan", time_parallel),
+    ]
+    for name, t in methods:
+        if t == fastest:
+            print(f"  {name}: {t:.3f} ms  ← FASTEST")
+        else:
+            print(f"  {name}: {t:.3f} ms  ({t/fastest:.2f}x slower)")
 
     print(f"""
-Why parallel scan wins at scale:
-- Conv2d: Each step is O(N·K²), total O(T·N·K²), SEQUENTIAL
-- FFT parallel scan:
-  * FFT inputs: O(T·N·log N) - parallelizable
-  * Scan: O(log T · N) depth - parallelizable
-  * IFFT: O(N·log N)
+Complexity analysis for T={T} timesteps:
+- Conv2d sequential: O(T·N·K²) = O({T}·{H*W}·{K*K}) sequential ops
+- FFT seq in freq:   O(T·N) sequential + O(N log N) FFT overhead
+- TRUE parallel scan: O(log T · N) = O({int(math.ceil(math.log2(T)))}·{H*W}) parallel depth
 
-Key insight: In FFT space, A^{T} is still N values (element-wise power)
-In pixel space, A^{T} would be a ({T}·{K})×({T}·{K}) = {T*(K-1)+1}×{T*(K-1)+1} kernel!
+Key insight: In FFT space, A^T is still N values (element-wise power)
+In pixel space, A^T would be a ({T}·{K})×({T}·{K}) = {T*(K-1)+1}×{T*(K-1)+1} kernel!
+
+NOTE: Current parallel scan uses pure PyTorch. Could be faster with:
+- Triton kernel (fused operations)
+- Mamba's selective_scan_cuda
+- torch.compile optimization
 """)
 
     # Visualization

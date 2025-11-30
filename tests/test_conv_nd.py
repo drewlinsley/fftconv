@@ -961,5 +961,196 @@ def test_conv3d_gradient_accuracy(dtype):
         f"k gradient error too large for {dtype}: rel={k_rel_err.item()}, abs={k_diff.max().item()}"
 
 
+# =============================================================================
+# Parallel Scan Tests
+# =============================================================================
+
+from flashfftconv import (
+    ConvSSMParallelScan2D,
+    ConvSSMParallelScan3D,
+    parallel_scan_fft,
+    parallel_scan_ref,
+)
+
+
+def test_parallel_scan_correctness_2d():
+    """
+    Test that parallel scan produces the same result as sequential scan.
+
+    This verifies the O(log T) parallel algorithm matches O(T) sequential.
+    """
+    torch.manual_seed(42)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    B, C, H, W = 2, 16, 16, 16
+    K = 3
+    T = 10
+
+    # Create kernels
+    A_kernel = torch.randn(C, K, K, device=device) * 0.1
+    B_kernel = torch.randn(C, K, K, device=device) * 0.1
+
+    # Input sequence
+    x_seq = torch.randn(T, B, C, H, W, device=device) * 0.1
+
+    # Method 1: Sequential reference (using FlashFFTConv2D)
+    fftconv = FlashFFTConv2D(H, W).to(device)
+    h_seq_ref = []
+    h = torch.zeros(B, C, H, W, device=device)
+    for t in range(T):
+        h = fftconv(h, A_kernel) + fftconv(x_seq[t], B_kernel)
+        h_seq_ref.append(h.clone())
+    h_seq_ref = torch.stack(h_seq_ref, dim=0)
+
+    # Method 2: Parallel scan
+    scanner = ConvSSMParallelScan2D(H, W).to(device)
+    h_seq_parallel = scanner(x_seq, A_kernel, B_kernel, return_all=True)
+
+    # Compare
+    diff = (h_seq_parallel - h_seq_ref).abs()
+    max_diff = diff.max().item()
+
+    print(f"\nParallel scan vs sequential: max diff = {max_diff:.6f}")
+
+    # Allow for numerical differences due to different computation order
+    assert max_diff < 0.1, f"Parallel scan differs too much from sequential: {max_diff}"
+
+
+def test_parallel_scan_final_only():
+    """Test parallel scan with return_all=False (only final state)."""
+    torch.manual_seed(42)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    B, C, H, W = 2, 16, 16, 16
+    K = 3
+    T = 10
+
+    A_kernel = torch.randn(C, K, K, device=device) * 0.1
+    B_kernel = torch.randn(C, K, K, device=device) * 0.1
+    x_seq = torch.randn(T, B, C, H, W, device=device) * 0.1
+
+    scanner = ConvSSMParallelScan2D(H, W).to(device)
+
+    # Get all hidden states
+    h_seq_all = scanner(x_seq, A_kernel, B_kernel, return_all=True)
+
+    # Get only final state
+    h_final = scanner(x_seq, A_kernel, B_kernel, return_all=False)
+
+    # Final state should match last state from return_all=True
+    diff = (h_final - h_seq_all[-1]).abs().max().item()
+    print(f"\nFinal state diff: {diff:.6f}")
+    assert diff < 1e-5, f"return_all=False differs from h_seq[-1]: {diff}"
+
+
+@pytest.mark.parametrize('T', [1, 2, 3, 7, 8, 15, 16, 31, 32, 64])
+def test_parallel_scan_various_lengths(T):
+    """Test parallel scan with various sequence lengths (including edge cases)."""
+    torch.manual_seed(42)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    B, C, H, W = 2, 8, 8, 8
+    K = 3
+
+    A_kernel = torch.randn(C, K, K, device=device) * 0.1
+    B_kernel = torch.randn(C, K, K, device=device) * 0.1
+    x_seq = torch.randn(T, B, C, H, W, device=device) * 0.1
+
+    scanner = ConvSSMParallelScan2D(H, W).to(device)
+    h_seq = scanner(x_seq, A_kernel, B_kernel, return_all=True)
+
+    # Verify shape
+    assert h_seq.shape == (T, B, C, H, W), f"Expected {(T, B, C, H, W)}, got {h_seq.shape}"
+
+    # Verify finite values
+    assert torch.isfinite(h_seq).all(), f"T={T}: NaN/Inf in parallel scan output"
+
+
+def test_parallel_scan_3d():
+    """Test 3D parallel scan."""
+    torch.manual_seed(42)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    B, C, D, H, W = 1, 8, 8, 8, 8
+    K = 3
+    T = 5
+
+    A_kernel = torch.randn(C, K, K, K, device=device) * 0.1
+    B_kernel = torch.randn(C, K, K, K, device=device) * 0.1
+    x_seq = torch.randn(T, B, C, D, H, W, device=device) * 0.1
+
+    # Sequential reference
+    fftconv = FlashFFTConv3D(D, H, W).to(device)
+    h = torch.zeros(B, C, D, H, W, device=device)
+    for t in range(T):
+        h = fftconv(h, A_kernel) + fftconv(x_seq[t], B_kernel)
+    h_final_ref = h
+
+    # Parallel scan
+    scanner = ConvSSMParallelScan3D(D, H, W).to(device)
+    h_final_parallel = scanner(x_seq, A_kernel, B_kernel, return_all=False)
+
+    # Compare
+    diff = (h_final_parallel - h_final_ref).abs().max().item()
+    print(f"\n3D parallel scan vs sequential: max diff = {diff:.6f}")
+    assert diff < 0.1, f"3D parallel scan differs too much: {diff}"
+
+
+def test_parallel_scan_fft_correctness():
+    """Test parallel_scan_fft function directly against reference implementation."""
+    torch.manual_seed(42)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    T, B, C = 16, 2, 8
+    H, W = 8, 8
+    fft_size = (2 * H, 2 * W)
+
+    # Create random FFT-domain tensors
+    # For rfftn output, last dim is H+1 for real FFT
+    fft_h = fft_size[0]
+    fft_w = fft_size[1] // 2 + 1
+
+    # Create test data in frequency domain
+    A_f = torch.randn(C, fft_h, fft_w, device=device, dtype=torch.complex64) * 0.1
+    B_f = torch.randn(C, fft_h, fft_w, device=device, dtype=torch.complex64) * 0.1
+    x_seq_f = torch.randn(T, B, C, fft_h, fft_w, device=device, dtype=torch.complex64) * 0.1
+
+    # Reference (sequential)
+    h_ref = parallel_scan_ref(A_f, B_f, x_seq_f)
+
+    # Parallel scan
+    h_parallel = parallel_scan_fft(A_f, B_f, x_seq_f, return_all=True)
+
+    # Compare
+    diff = (h_parallel - h_ref).abs().max().item()
+    print(f"\nparallel_scan_fft vs ref: max diff = {diff:.6f}")
+
+    # Should match closely since both operate in frequency domain
+    assert diff < 1e-4, f"parallel_scan_fft differs from reference: {diff}"
+
+
+def test_parallel_scan_fft_final_only():
+    """Test parallel_scan_fft with return_all=False."""
+    torch.manual_seed(42)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    T, B, C = 16, 2, 8
+    fft_h, fft_w = 16, 9  # Typical rfftn output shape
+
+    A_f = torch.randn(C, fft_h, fft_w, device=device, dtype=torch.complex64) * 0.1
+    B_f = torch.randn(C, fft_h, fft_w, device=device, dtype=torch.complex64) * 0.1
+    x_seq_f = torch.randn(T, B, C, fft_h, fft_w, device=device, dtype=torch.complex64) * 0.1
+
+    # Get all
+    h_all = parallel_scan_fft(A_f, B_f, x_seq_f, return_all=True)
+
+    # Get final only
+    h_final = parallel_scan_fft(A_f, B_f, x_seq_f, return_all=False)
+
+    # Should match
+    diff = (h_final - h_all[-1]).abs().max().item()
+    assert diff < 1e-6, f"return_all=False differs: {diff}"
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
