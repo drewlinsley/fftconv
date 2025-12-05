@@ -132,17 +132,14 @@ class TAPVidDataset:
         for t in range(T):
             video_resized[t] = cv2.resize(video[t], (new_W, new_H))
 
-        # Scale points
-        scale_x = new_W / W
-        scale_y = new_H / H
-        points_scaled = points.copy()
-        points_scaled[..., 0] *= scale_x  # x
-        points_scaled[..., 1] *= scale_y  # y
+        # TAP-Vid stores points as normalized (0-1), not pixel coordinates!
+        # points[..., 0] is x (normalized), points[..., 1] is y (normalized)
+        points_norm = points.copy()  # Already normalized (0-1)
 
-        # Normalize points to [0, 1]
-        points_norm = points_scaled.copy()
-        points_norm[..., 0] /= new_W
-        points_norm[..., 1] /= new_H
+        # Convert to pixel coordinates in the resized image
+        points_scaled = points.copy()
+        points_scaled[..., 0] *= new_W  # x in pixels
+        points_scaled[..., 1] *= new_H  # y in pixels
 
         # Create query points (sample from first frames where visible)
         query_points = np.zeros((N, 3), dtype=np.float32)  # (t, y, x) normalized
@@ -247,6 +244,39 @@ def ssm_associative_op(left, right):
     return (a_left * a_right, a_right * b_left + b_right)
 
 
+def heinsen_associative_scan_log(log_coeffs: jnp.ndarray, log_values: jnp.ndarray) -> jnp.ndarray:
+    """Heinsen's associative scan in log-space for numerical stability."""
+    def associative_op(left, right):
+        log_a_left, log_b_left = left
+        log_a_right, log_b_right = right
+        new_log_a = log_a_left + log_a_right
+        new_log_b = jnp.logaddexp(log_a_right + log_b_left, log_b_right)
+        return (new_log_a, new_log_b)
+
+    _, log_h = jax.lax.associative_scan(
+        associative_op,
+        (log_coeffs, log_values),
+        axis=0
+    )
+    return log_h
+
+
+def log_space_scan(gate_seq: jnp.ndarray, h_tilde_seq: jnp.ndarray, eps: float = 1e-6) -> jnp.ndarray:
+    """Log-space scan using minGRU formulation with complementary gates.
+
+    Computes h_t = (1-z_t) * h_{t-1} + z_t * h_tilde_t with numerical stability.
+    """
+    k = gate_seq
+    log_z = -jax.nn.softplus(-k)
+    log_coeffs = -jax.nn.softplus(k)
+    h_tilde_positive = jax.nn.softplus(h_tilde_seq)
+    log_h_tilde = jnp.log(h_tilde_positive + eps)
+    log_values = log_z + log_h_tilde
+    log_h = heinsen_associative_scan_log(log_coeffs, log_values)
+    h = jnp.exp(log_h)
+    return h
+
+
 class ParallelConvSSM3D(nn.Module):
     """3D Parallel ConvSSM using associative scan."""
     dim: int
@@ -305,6 +335,72 @@ class ParallelConvSSM3D(nn.Module):
 
         h_final_f = h_all_f[-1]
         h_final = jnp.fft.ifftn(h_final_f, axes=(1, 2, 3)).real
+
+        return h_final
+
+
+class GatedParallelConvSSM3D(nn.Module):
+    """3D Parallel ConvSSM with minGRU-style gating.
+
+    Uses log-space associative scan for numerical stability with
+    input-dependent gates for more expressive temporal modeling.
+    """
+    dim: int
+    iterations: int = 8
+    kernel_size: Tuple[int, int, int] = (3, 7, 7)
+    dtype: jnp.dtype = jnp.float32
+
+    @nn.compact
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        B, T, H, W, C = x.shape
+        kt, kh, kw = self.kernel_size
+
+        # Spatial convolution kernel for candidate computation
+        B_kernel = self.param(
+            'B_kernel',
+            nn.initializers.normal(0.02),
+            (C, kt, kh, kw),
+            self.dtype
+        )
+
+        # Prepare FFT-based spatial convolution
+        center_t, center_h, center_w = kt // 2, kh // 2, kw // 2
+        t_idx, h_idx, w_idx = jnp.arange(kt), jnp.arange(kh), jnp.arange(kw)
+        target_t = (t_idx - center_t) % T
+        target_h = (h_idx - center_h) % H
+        target_w = (w_idx - center_w) % W
+        tt, th, tw = jnp.meshgrid(target_t, target_h, target_w, indexing='ij')
+
+        B_padded = jnp.zeros((C, T, H, W), dtype=self.dtype)
+        B_padded = B_padded.at[:, tt, th, tw].set(B_kernel)
+        B_f = jnp.fft.fftn(B_padded, axes=(1, 2, 3))
+        B_f = B_f.transpose(1, 2, 3, 0)[None, ...]
+
+        # Compute candidate hidden state via spatial convolution
+        x_f = jnp.fft.fftn(x, axes=(1, 2, 3))
+        h_tilde_f = B_f * x_f
+        h_tilde = jnp.fft.ifftn(h_tilde_f, axes=(1, 2, 3)).real  # (B, T, H, W, C)
+
+        # Input-dependent gate: project input to gate logits
+        gate_proj = nn.Dense(C, dtype=self.dtype, name='gate_proj')
+        gate_logits = gate_proj(x)  # (B, T, H, W, C)
+
+        # Build iteration sequences for log-space scan
+        # Shape: (iterations, B, T, H, W, C)
+        gate_seq = jnp.broadcast_to(
+            gate_logits[None, ...],
+            (self.iterations, B, T, H, W, C)
+        )
+        h_tilde_seq = jnp.broadcast_to(
+            h_tilde[None, ...],
+            (self.iterations, B, T, H, W, C)
+        )
+
+        # Run minGRU-style log-space scan across iterations
+        h_all = log_space_scan(gate_seq, h_tilde_seq)
+
+        # Take final iteration
+        h_final = h_all[-1]
 
         return h_final
 
@@ -418,6 +514,7 @@ class ConvSSMPointTracker(nn.Module):
     ssm_iterations: int = 8
     kernel_size: Tuple[int, int, int] = (3, 7, 7)
     num_refinement: int = 3
+    use_gated: bool = False  # Use minGRU-style gating
     dtype: jnp.dtype = jnp.float32
 
     @nn.compact
@@ -481,8 +578,9 @@ class ConvSSMPointTracker(nn.Module):
         corr_ssm = nn.Conv(64, (1, 1, 1), dtype=self.dtype)(corr_ssm)
 
         # 3D ConvSSM refinement
+        SSMClass = GatedParallelConvSSM3D if self.use_gated else ParallelConvSSM3D
         for i in range(self.num_refinement):
-            corr_residual = ParallelConvSSM3D(
+            corr_residual = SSMClass(
                 dim=64,
                 iterations=self.ssm_iterations,
                 kernel_size=self.kernel_size,
@@ -793,12 +891,14 @@ def train(args):
             hidden_dim=args.hidden_dim,
         )
     else:
-        print(f"Using ConvSSMPointTracker (ssm_iterations={args.ssm_iterations})")
+        gated_str = "gated " if args.use_gated else ""
+        print(f"Using ConvSSMPointTracker ({gated_str}ssm_iterations={args.ssm_iterations})")
         model = ConvSSMPointTracker(
             hidden_dim=args.hidden_dim,
             ssm_iterations=args.ssm_iterations,
             kernel_size=(args.kernel_t, args.kernel_h, args.kernel_w),
             num_refinement=args.num_refinement,
+            use_gated=args.use_gated,
         )
 
     # Create train state
@@ -955,6 +1055,8 @@ def main():
                         help='Width kernel size')
     parser.add_argument('--num_refinement', type=int, default=3,
                         help='Number of SSM refinement blocks')
+    parser.add_argument('--use_gated', action='store_true',
+                        help='Use minGRU-style gated ConvSSM')
 
     # Training
     parser.add_argument('--epochs', type=int, default=100,

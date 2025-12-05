@@ -1,6 +1,6 @@
 {
-  "last_updated": "2025-12-02T11:02:25.417902",
-  "num_runs": 8,
+  "last_updated": "2025-12-05T15:45:00.000000",
+  "num_runs": 11,
   "benchmarks": [
     {
       "run_id": "run-20251128_153608-ltmukogh",
@@ -104,6 +104,45 @@
       "kernel_size": 7,
       "best_val_acc": 35.89212894439697,
       "step_time_ms": 71.97565466670666,
+      "epochs": 100
+    },
+    {
+      "run_id": "run-20251202_113351-kz73iqo6",
+      "timestamp": "20251202_113351_kz73iqo6",
+      "model_type": "ssm_3d",
+      "display_name": "3D parallel SSM T=8",
+      "num_params_M": 28.17889,
+      "batch_size": 32,
+      "T": 8,
+      "kernel_size": 7,
+      "best_val_acc": 89.26272392272949,
+      "step_time_ms": 892.5398018400548,
+      "epochs": 100
+    },
+    {
+      "run_id": "run-20251203_212953-jg4kfbzh",
+      "timestamp": "20251203_212953_jg4kfbzh",
+      "model_type": "pure_ssm_3d",
+      "display_name": "3D_all_parallel_SSM T=8",
+      "num_params_M": 30.742378,
+      "batch_size": 32,
+      "T": 8,
+      "kernel_size": 7,
+      "best_val_acc": 82.46709108352661,
+      "step_time_ms": 637.5837115918175,
+      "epochs": 100
+    },
+    {
+      "run_id": "run-20251204_114939-oyrjr2bm",
+      "timestamp": "20251204_114939_oyrjr2bm",
+      "model_type": "gated_ssm_v2",
+      "display_name": "GRU_gated_parallel_SSM T=8",
+      "num_params_M": 34.010386,
+      "batch_size": 32,
+      "T": 8,
+      "kernel_size": 7,
+      "best_val_acc": 82.274729013443,
+      "step_time_ms": 159.57559731047033,
       "epochs": 100
     }
   ]
