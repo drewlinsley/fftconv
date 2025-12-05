@@ -1,6 +1,7 @@
 checkpoints*
 wandb
 .DS_Store
+visualizations_*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -1,0 +1,110 @@
+{
+  "last_updated": "2025-12-02T11:02:25.417902",
+  "num_runs": 8,
+  "benchmarks": [
+    {
+      "run_id": "run-20251128_153608-ltmukogh",
+      "timestamp": "20251128_153608_ltmukogh",
+      "model_type": "convnext",
+      "display_name": "convnext T=8",
+      "num_params_M": 27.827818,
+      "batch_size": 32,
+      "T": 8,
+      "kernel_size": 7,
+      "best_val_acc": 89.50469493865967,
+      "step_time_ms": 57.684473264015324,
+      "epochs": 100
+    },
+    {
+      "run_id": "run-20251129_231202-ylyq2fq4",
+      "timestamp": "20251129_231202_ylyq2fq4",
+      "model_type": "convnext",
+      "display_name": "convnext T=8",
+      "num_params_M": 27.827818,
+      "batch_size": 32,
+      "T": 8,
+      "kernel_size": 7,
+      "best_val_acc": 89.47928547859192,
+      "step_time_ms": 56.701055623717224,
+      "epochs": 100
+    },
+    {
+      "run_id": "run-20251129_224133-b4fcljcv",
+      "timestamp": "20251129_224133_b4fcljcv",
+      "model_type": "fft_simple",
+      "display_name": "fft_simple T=8",
+      "num_params_M": 27.821194,
+      "batch_size": 32,
+      "T": 8,
+      "kernel_size": 7,
+      "best_val_acc": 89.00865912437439,
+      "step_time_ms": 57.524003820904234,
+      "epochs": 100
+    },
+    {
+      "run_id": "run-20251129_233029-7w85k5sg",
+      "timestamp": "20251129_233029_7w85k5sg",
+      "model_type": "parallel_ssm",
+      "display_name": "parallel_ssm T=8",
+      "num_params_M": 28.470346,
+      "batch_size": 32,
+      "T": 8,
+      "kernel_size": 7,
+      "best_val_acc": 86.37848496437073,
+      "step_time_ms": 79.6852903851008,
+      "epochs": 100
+    },
+    {
+      "run_id": "run-20251129_234310-2fv9xyo6",
+      "timestamp": "20251129_234310_2fv9xyo6",
+      "model_type": "parallel_ssm",
+      "display_name": "parallel_ssm T=24",
+      "num_params_M": 28.470346,
+      "batch_size": 32,
+      "T": 24,
+      "kernel_size": 7,
+      "best_val_acc": 78.80855798721313,
+      "step_time_ms": 144.68875981993594,
+      "epochs": 100
+    },
+    {
+      "run_id": "run-20251130_094041-94km2dbw",
+      "timestamp": "20251130_094041_94km2dbw",
+      "model_type": "gated_ssm",
+      "display_name": "gated_ssm T=8",
+      "num_params_M": 38.194666,
+      "batch_size": 32,
+      "T": 8,
+      "kernel_size": 7,
+      "best_val_acc": 77.57452130317688,
+      "step_time_ms": 117.04279770285396,
+      "epochs": 100
+    },
+    {
+      "run_id": "run-20251129_113604-cf7zdapa",
+      "timestamp": "20251129_113604_cf7zdapa",
+      "model_type": "fourier_v3",
+      "display_name": "fourier_v3",
+      "num_params_M": 54.053482,
+      "batch_size": 32,
+      "T": 1,
+      "kernel_size": 7,
+      "best_val_acc": 36.642226576805115,
+      "step_time_ms": 73.11706138869464,
+      "epochs": 100
+    },
+    {
+      "run_id": "run-20251129_113655-pqgnl7kr",
+      "timestamp": "20251129_113655_pqgnl7kr",
+      "model_type": "fourier_pure",
+      "display_name": "fourier_pure T=8",
+      "num_params_M": 53.728906,
+      "batch_size": 32,
+      "T": 8,
+      "kernel_size": 7,
+      "best_val_acc": 35.89212894439697,
+      "step_time_ms": 71.97565466670666,
+      "epochs": 100
+    }
+  ]
+}

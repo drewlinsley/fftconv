@@ -77,6 +77,19 @@ from flashfftconv.convnext_spatial_ssm import convnext_spatial_ssm_tiny
 # Parallel ConvSSM using associative_scan (O(log T) parallel, much faster!)
 from flashfftconv.convnext_fft_ssm_parallel import convnext_parallel_ssm_tiny
 
+# Gated ConvSSM (Mamba2-style input-dependent gates with parallel scan)
+from flashfftconv.convnext_gated_ssm import convnext_gated_ssm_tiny
+
+# Gated ConvSSM V2 (input-dependent kernel gating with parallel scan)
+from flashfftconv.convnext_gated_convssm_v2 import gated_convnext_ssm_v2_tiny
+
+# 3D ConvSSM (repeats input T times, uses 3D FFT convolutions)
+from flashfftconv.convnext_3d_ssm import convnext_3d_ssm_tiny
+from flashfftconv.convnext_3d_pure_ssm import pure_convnext_3d_ssm_tiny
+
+# 3D Mamba-Gated ConvSSM (3D SSM with input-dependent gates)
+from flashfftconv.convnext_3d_mamba import convnext_3d_mamba_tiny
+
 # Imagenette class names (10 classes)
 IMAGENETTE_CLASSES = [
     'n01440764',  # tench
@@ -1003,6 +1016,11 @@ def train(args):
     fft_ssm_mode = args.model_type == 'fft_ssm'  # FFT-Simple + ConvSSM blocks
     spatial_ssm_mode = args.model_type == 'spatial_ssm'  # Spatial Conv + ConvSSM blocks
     parallel_ssm_mode = args.model_type == 'parallel_ssm'  # Parallel ConvSSM (associative_scan)
+    gated_ssm_mode = args.model_type == 'gated_ssm'  # Mamba2-style gated parallel ConvSSM
+    gated_ssm_v2_mode = args.model_type == 'gated_ssm_v2'  # Input-dependent kernel gating with parallel scan
+    ssm_3d_mode = args.model_type == 'ssm_3d'  # 3D ConvSSM (repeats input T times)
+    pure_ssm_3d_mode = args.model_type == 'pure_ssm_3d'  # Pure 3D ConvSSM (SSM replaces dwconv)
+    mamba_3d_mode = args.model_type == 'mamba_3d'  # 3D Mamba-gated ConvSSM
     fourier_mode = args.model_type == 'fourier'  # Pre-FFT mode
     fourier_v2_mode = args.model_type == 'fourier_v2'  # All-FFT stable mode
     fourier_v2_bf16_mode = args.model_type == 'fourier_v2_bf16'  # All-FFT with bfloat16 SSM
@@ -1029,6 +1047,59 @@ def train(args):
             drop_path_rate=args.drop_path,
         )
         model_name = f"ConvNeXt-Parallel-SSM-Tiny-T{args.T}"
+    elif gated_ssm_mode:
+        print(f"Using ConvNeXt-Gated-SSM (Mamba2-style gated parallel ConvSSM, T={args.T})")
+        model = convnext_gated_ssm_tiny(
+            num_classes=10,
+            T=args.T,
+            kernel_size=args.kernel_size,
+            drop_path_rate=args.drop_path,
+        )
+        model_name = f"ConvNeXt-Gated-SSM-Tiny-T{args.T}"
+    elif gated_ssm_v2_mode:
+        print(f"Using ConvNeXt-Gated-SSM-V2 (input-dependent kernel gating, mode={args.gating_mode}, T={args.T}, num_basis={args.num_basis})")
+        model = gated_convnext_ssm_v2_tiny(
+            num_classes=10,
+            num_iterations=args.T,
+            kernel_size=args.kernel_size,
+            num_basis=args.num_basis,
+            gating_mode=args.gating_mode,
+            drop_path_rate=args.drop_path,
+        )
+        model_name = f"ConvNeXt-Gated-SSM-V2-Tiny-T{args.T}-{args.gating_mode}"
+    elif ssm_3d_mode:
+        print(f"Using ConvNeXt-3D-SSM (3D FFT conv 7x7x1 + 3D ConvSSM {args.ssm_kernel_size}x{args.ssm_kernel_size}x{args.ssm_kernel_size_t}, T={args.T})")
+        model = convnext_3d_ssm_tiny(
+            num_classes=10,
+            T=args.T,
+            kernel_size=args.kernel_size,  # 7 for depthwise conv (spatial only)
+            ssm_kernel_size=args.ssm_kernel_size,
+            ssm_kernel_size_t=args.ssm_kernel_size_t,
+            drop_path_rate=args.drop_path,
+        )
+        model_name = f"ConvNeXt-3D-SSM-Tiny-T{args.T}-SSM{args.ssm_kernel_size}x{args.ssm_kernel_size}x{args.ssm_kernel_size_t}"
+    elif pure_ssm_3d_mode:
+        print(f"Using Pure ConvNeXt-3D-SSM (ConvSSM replaces dwconv, {args.kernel_size}x{args.kernel_size}x{args.ssm_kernel_size_t}, T={args.T})")
+        model = pure_convnext_3d_ssm_tiny(
+            num_classes=10,
+            T=args.T,
+            kernel_size=args.kernel_size,  # 7 spatial (replaces dwconv)
+            kernel_size_t=args.ssm_kernel_size_t,  # 5 temporal
+            drop_path_rate=args.drop_path,
+        )
+        model_name = f"Pure-ConvNeXt-3D-SSM-Tiny-T{args.T}-K{args.kernel_size}x{args.kernel_size}x{args.ssm_kernel_size_t}"
+    elif mamba_3d_mode:
+        print(f"Using ConvNeXt-3D-Mamba (3D FFT conv + Mamba-gated 3D ConvSSM {args.ssm_kernel_size}x{args.ssm_kernel_size}x{args.ssm_kernel_size_t}, T={args.T})")
+        model = convnext_3d_mamba_tiny(
+            num_classes=10,
+            T=args.T,
+            kernel_size=args.kernel_size,  # 7 for depthwise conv (spatial only)
+            ssm_kernel_size=args.ssm_kernel_size,
+            ssm_kernel_size_t=args.ssm_kernel_size_t,
+            use_delta=True,
+            drop_path_rate=args.drop_path,
+        )
+        model_name = f"ConvNeXt-3D-Mamba-Tiny-T{args.T}-SSM{args.ssm_kernel_size}x{args.ssm_kernel_size}x{args.ssm_kernel_size_t}"
     elif fft_ssm_mode:
         print(f"Using ConvNeXt-FFT-SSM (FFT depthwise conv + ConvSSM blocks, T={args.T})")
         model = convnext_fft_ssm_tiny(
@@ -1362,8 +1433,8 @@ def main():
 
     # Model
     parser.add_argument('--model_type', type=str, default='ssm',
-                        choices=['convnext', 'ssm', 'fourier', 'fourier_v2', 'fourier_v2_bf16', 'fourier_v3', 'fourier_v3_bf16', 'fourier_pure', 'fft_simple', 'fft_ssm', 'spatial_ssm', 'parallel_ssm'],
-                        help='Model type: convnext (standard baseline), ssm (ConvNeXt-SSM), fourier (ConvNeXt-Fourier-PreFFT), fourier_v2 (all-FFT stable), fourier_v2_bf16 (all-FFT bf16), fourier_v3 (all-FFT param-efficient ~28M), fourier_v3_bf16 (all-FFT param-efficient bf16), fourier_pure (exact ConvNeXt equiv in FFT domain, no SSM), fft_simple (simple FFT conv drop-in), fft_ssm (FFT-Simple + ConvSSM blocks), spatial_ssm (spatial Conv + ConvSSM blocks), parallel_ssm (parallel ConvSSM via associative_scan)')
+                        choices=['convnext', 'ssm', 'fourier', 'fourier_v2', 'fourier_v2_bf16', 'fourier_v3', 'fourier_v3_bf16', 'fourier_pure', 'fft_simple', 'fft_ssm', 'spatial_ssm', 'parallel_ssm', 'gated_ssm', 'gated_ssm_v2', 'ssm_3d', 'pure_ssm_3d'],
+                        help='Model type: convnext (standard baseline), ssm (ConvNeXt-SSM), fourier (ConvNeXt-Fourier-PreFFT), fourier_v2 (all-FFT stable), fourier_v2_bf16 (all-FFT bf16), fourier_v3 (all-FFT param-efficient ~28M), fourier_v3_bf16 (all-FFT param-efficient bf16), fourier_pure (exact ConvNeXt equiv in FFT domain, no SSM), fft_simple (simple FFT conv drop-in), fft_ssm (FFT-Simple + ConvSSM blocks), spatial_ssm (spatial Conv + ConvSSM blocks), parallel_ssm (parallel ConvSSM via associative_scan), gated_ssm (Mamba2-style gated parallel ConvSSM), gated_ssm_v2 (input-dependent kernel gating)')
     parser.add_argument('--model', type=str, default='tiny',
                         choices=['tiny', 'small', 'base'],
                         help='Model size (for ssm model type)')
@@ -1371,6 +1442,15 @@ def main():
                         help='Number of SSM iterations')
     parser.add_argument('--kernel_size', type=int, default=7,
                         help='SSM kernel size')
+    parser.add_argument('--ssm_kernel_size', type=int, default=3,
+                        help='3D SSM spatial kernel size (for ssm_3d mode)')
+    parser.add_argument('--ssm_kernel_size_t', type=int, default=3,
+                        help='3D SSM temporal kernel size (for ssm_3d mode)')
+    parser.add_argument('--gating_mode', type=str, default='both',
+                        choices=['coefficient', 'kernel_attention', 'both'],
+                        help='Gating mode for gated_ssm_v2: coefficient (scalar modulation), kernel_attention (attention-weighted basis kernels), both (combined)')
+    parser.add_argument('--num_basis', type=int, default=4,
+                        help='Number of basis kernels for kernel_attention gating mode (gated_ssm_v2)')
     parser.add_argument('--use_spatial', action='store_true',
                         help='Use spatial-domain SSM instead of Fourier')
     parser.add_argument('--drop_path', type=float, default=0.1,
