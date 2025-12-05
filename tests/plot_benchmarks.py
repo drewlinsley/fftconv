@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+from adjustText import adjust_text
 
 
 def load_benchmarks(path: str = "benchmark_results.json") -> pd.DataFrame:
@@ -51,16 +52,16 @@ def plot_benchmarks(df: pd.DataFrame, output_prefix: str = "benchmark"):
     cbar = plt.colorbar(scatter, ax=ax1)
     cbar.set_label("Parameters (M)", fontsize=10)
 
-    # Add labels for each point
+    # Add labels for each point using adjustText to avoid overlaps
+    texts1 = []
     for _, row in df.iterrows():
-        ax1.annotate(
+        texts1.append(ax1.text(
+            row["step_time_ms"], row["best_val_acc"],
             row["display_name"],
-            (row["step_time_ms"], row["best_val_acc"]),
-            xytext=(5, 5),
-            textcoords="offset points",
             fontsize=8,
             alpha=0.8
-        )
+        ))
+    adjust_text(texts1, ax=ax1, arrowprops=dict(arrowstyle='-', color='gray', alpha=0.5))
 
     ax1.set_xlabel("Step Time (ms)", fontsize=12)
     ax1.set_ylabel("Best Validation Accuracy (%)", fontsize=12)
@@ -82,16 +83,16 @@ def plot_benchmarks(df: pd.DataFrame, output_prefix: str = "benchmark"):
     cbar2 = plt.colorbar(scatter2, ax=ax2)
     cbar2.set_label("Accuracy (%)", fontsize=10)
 
-    # Add labels
+    # Add labels using adjustText to avoid overlaps
+    texts2 = []
     for _, row in df.iterrows():
-        ax2.annotate(
+        texts2.append(ax2.text(
+            row["step_time_ms"], row["num_params_M"],
             row["display_name"],
-            (row["step_time_ms"], row["num_params_M"]),
-            xytext=(5, 5),
-            textcoords="offset points",
             fontsize=8,
             alpha=0.8
-        )
+        ))
+    adjust_text(texts2, ax=ax2, arrowprops=dict(arrowstyle='-', color='gray', alpha=0.5))
 
     ax2.set_xlabel("Step Time (ms)", fontsize=12)
     ax2.set_ylabel("Parameters (M)", fontsize=12)

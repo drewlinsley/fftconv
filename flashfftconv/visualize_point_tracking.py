@@ -127,14 +127,14 @@ def draw_tracks_on_frame(
         # Draw trail (past positions)
         start_t = max(0, frame_idx - trail_length)
 
-        # GT trail (solid line)
+        # GT trail (solid line) - thicker for visibility
         for t in range(start_t, frame_idx):
             if not gt_occ[point_idx, t] and not gt_occ[point_idx, t + 1]:
                 pt1 = tuple(int(c) for c in gt_coords[point_idx, t])
                 pt2 = tuple(int(c) for c in gt_coords[point_idx, t + 1])
-                cv2.line(frame, pt1, pt2, color, 2)
+                cv2.line(frame, pt1, pt2, color, 3)
 
-        # Predicted trail (dashed/lighter)
+        # Predicted trail (dashed/lighter) - thicker for visibility
         pred_color = tuple(min(255, int(c * 1.3)) for c in color)
         for t in range(start_t, frame_idx):
             if pred_occ[point_idx, t] < 0.5 and pred_occ[point_idx, t + 1] < 0.5:
@@ -142,27 +142,27 @@ def draw_tracks_on_frame(
                 pt2 = tuple(int(c) for c in pred_coords[point_idx, t + 1])
                 # Dashed line effect
                 if (t - start_t) % 2 == 0:
-                    cv2.line(frame, pt1, pt2, pred_color, 1, cv2.LINE_AA)
+                    cv2.line(frame, pt1, pt2, pred_color, 2, cv2.LINE_AA)
 
         # Draw current positions
-        # GT position (circle)
+        # GT position (circle) - made larger for visibility
         if not gt_occ[point_idx, frame_idx]:
             gt_pt = tuple(int(c) for c in gt_coords[point_idx, frame_idx])
-            cv2.circle(frame, gt_pt, 6, color, -1)
-            cv2.circle(frame, gt_pt, 6, (255, 255, 255), 1)
+            cv2.circle(frame, gt_pt, 12, color, -1)
+            cv2.circle(frame, gt_pt, 12, (255, 255, 255), 2)
 
-        # Predicted position (X marker)
+        # Predicted position (X marker) - made larger for visibility
         if pred_occ[point_idx, frame_idx] < 0.5:
             pred_pt = tuple(int(c) for c in pred_coords[point_idx, frame_idx])
-            size = 5
+            size = 10
             cv2.line(frame,
                      (pred_pt[0] - size, pred_pt[1] - size),
                      (pred_pt[0] + size, pred_pt[1] + size),
-                     pred_color, 2)
+                     pred_color, 3)
             cv2.line(frame,
                      (pred_pt[0] - size, pred_pt[1] + size),
                      (pred_pt[0] + size, pred_pt[1] - size),
-                     pred_color, 2)
+                     pred_color, 3)
 
     return frame
 
